@@ -12,11 +12,11 @@ motivation can be explained by an example situation:
 - neuroevolution (uses evolutionary algs to gen architectures, its like a natural selection with mutations and evolutions of the network)
 - differentiable architecture search (DARTS) (uses continuous relaxation, to let the search space differentiable, allowing gradient descent)
 - one-shot NAS (train a large super network, and then tries sub-networks of the large one - **only one training** makes this method fast)
-- training-free methods (**super fucking relampo marquinhos fast** - works with a heuristic for the pre-trained arc that correlates with validation acc, so you predict how the arc will do without training)
+- training-free methods (**super fucking relampago marquinhos fast** - works with a heuristic for the pre-trained arc that correlates with validation acc, so you predict how the arc will do without training)
 
->more expensive: RNN, neuroevolution and DARTS
+>**more expensive:** RNN, neuroevolution and DARTS
 
->less expensive: one-shot NAS, training-free methods
+>**less expensive:** one-shot NAS, training-free methods
 
 ### reproducibility problem
 
