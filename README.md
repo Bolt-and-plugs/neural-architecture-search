@@ -38,3 +38,4 @@ motivation can be explained by an example situation:
 # References
 
 1. Why care about NAS? [https://youtu.be/_dR8a5ZcBgM?si=BZx7c7BzxSQjO9Fs]
+2. Systematic review on neural architecture search [https://link.springer.com/article/10.1007/s10462-024-11058-w]
