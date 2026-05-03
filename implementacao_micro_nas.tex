@@ -1,0 +1,443 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[portuguese]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{mathptmx}
+\usepackage{appendix}
+\usepackage{caption}
+
+% Configuração do estilo de código Python
+\lstdefinestyle{python}{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue!70!black}\bfseries,
+    stringstyle=\color{orange!80!black},
+    commentstyle=\color{gray}\itshape,
+    numberstyle=\tiny\color{gray},
+    numbers=left,
+    stepnumber=1,
+    numbersep=8pt,
+    backgroundcolor=\color{gray!8},
+    frame=single,
+    rulecolor=\color{gray!40},
+    breaklines=true,
+    breakatwhitespace=true,
+    showstringspaces=false,
+    tabsize=4,
+    captionpos=b
+}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black
+}
+
+\title{\textbf{Implementação Micro-NAS:\\Comparação das SSt em Ambiente Controlado}}
+\author{Gabriel Brum}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ===========================================================================
+\section{Introdução à Implementação}
+% ===========================================================================
+
+Esta seção documenta a implementação prática desenvolvida para o seminário, cujo objetivo é demonstrar o funcionamento das cinco Estratégias de Busca (SSt) mais recorrentes na literatura de \textit{Neural Architecture Search} (NAS) em um ambiente controlado e de baixo custo computacional.
+
+A implementação foi concebida como um \textbf{Micro-NAS}: um experimento simplificado que preserva a lógica central de cada SSt, mas opera sobre um espaço de busca (SSp) pequeno e uma estratégia de validação (VSt) de baixa fidelidade. Isso permite executar e comparar todos os algoritmos em minutos, sem necessidade de infraestrutura especializada, tornando-o adequado para fins didáticos.
+
+O código foi desenvolvido em Python, executado em ambiente Google Colab com GPU T4, e está disponível no notebook \texttt{Micro\_NAS\_revisado.ipynb} entregue junto a este relatório.
+
+% ===========================================================================
+\section{Decisões de Projeto}
+% ===========================================================================
+
+\subsection{Ferramentas e Bibliotecas}
+
+A implementação utiliza apenas bibliotecas de propósito geral, sem frameworks NAS dedicados (como NNI, Auto-Keras ou Optuna). Essa escolha é intencional: o objetivo é expor o mecanismo de cada SSt, não abstraí-lo.
+
+\begin{itemize}[noitemsep]
+    \item \textbf{TensorFlow / Keras:} construção, compilação e treinamento dos modelos candidatos. Fornece a VSt completa em poucas linhas.
+    \item \textbf{NumPy:} operações vetoriais auxiliares (argmax sobre previsões do surrogate, normalização de dados).
+    \item \textbf{Scikit-learn (\texttt{RandomForestRegressor}):} modelo substituto (\textit{surrogate model}) para a Otimização Bayesiana.
+    \item \textbf{Módulos padrão (\texttt{random}, \texttt{time}):} amostragem, mutação e medição de tempo de execução.
+\end{itemize}
+
+\subsection{Dataset: MNIST em Subconjunto Reduzido}
+
+O MNIST foi escolhido por ser um \textit{benchmark} clássico, de carregamento imediato via Keras e com imagens suficientemente simples para que 1 época de treinamento já produza um sinal de desempenho discriminativo entre arquiteturas.
+
+Para reduzir o custo de cada avaliação (VSt de baixa fidelidade), foram utilizados apenas:
+\begin{itemize}[noitemsep]
+    \item \textbf{3.000 amostras de treino} (em vez de 60.000)
+    \item \textbf{1.000 amostras de validação} (em vez de 10.000)
+\end{itemize}
+
+As imagens foram normalizadas para $[0, 1]$ e expandidas para o formato $(28 \times 28 \times 1)$ exigido pela camada \texttt{Conv2D}.
+
+% ===========================================================================
+\section{Definição do SSp e da VSt}
+% ===========================================================================
+
+\subsection{Search Space (SSp)}
+
+O SSp é do tipo \textit{layer-based}: a topologia da rede é fixa (sequencial) e a busca ocorre exclusivamente sobre os valores de quatro hiperparâmetros por camada. Isso resulta em $3 \times 2 \times 3 \times 3 = 54$ arquiteturas distintas possíveis.
+
+\begin{table}[h]
+\centering
+\caption{Hiperparâmetros e valores do SSp.}
+\begin{tabular}{lll}
+\toprule
+\textbf{Hiperparâmetro} & \textbf{Valores possíveis} & \textbf{Justificativa} \\
+\midrule
+\texttt{filters}      & 16, 32, 64            & Capacidade da camada convolucional \\
+\texttt{kernel\_size} & 3, 5                  & Tamanho do campo receptivo \\
+\texttt{activation}   & relu, elu, tanh       & Funções de ativação mais comuns \\
+\texttt{dropout}      & 0,1\ \ 0,3\ \ 0,5    & Regularização da camada densa \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A arquitetura resultante para um conjunto de parâmetros $\theta$ é sempre:
+
+\begin{center}
+\texttt{Input(28×28×1) → Conv2D(\(\theta\)) → MaxPool(2×2) → Flatten → Dropout(\(\theta\)) → Dense(10, softmax)}
+\end{center}
+
+\subsection{Validation Strategy (VSt)}
+
+A VSt implementada é do tipo \textbf{\textit{Partial Training}} (Tipo 1): cada arquitetura candidata é treinada do zero por exatamente \textbf{1 época} no subconjunto reduzido, e a acurácia de validação ao final dessa época é retornada como sinal de desempenho para a SSt.
+
+\begin{lstlisting}[style=python, caption={Implementação da VSt (Partial Training, 1 época).}]
+def avaliar_arquitetura(params):
+    model = models.Sequential([
+        Input(shape=(28, 28, 1)),
+        layers.Conv2D(params['filters'], params['kernel_size'],
+                      activation=params['activation']),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dropout(params['dropout']),
+        layers.Dense(10, activation='softmax')
+    ])
+    model.compile(optimizer='adam',
+                  loss='sparse_categorical_crossentropy',
+                  metrics=['accuracy'])
+    history = model.fit(x_train, y_train, epochs=1,
+                        validation_data=(x_test, y_test), verbose=0)
+    return history.history['val_accuracy'][0]
+\end{lstlisting}
+
+\textbf{Simplificações em relação à literatura:}
+\begin{itemize}[noitemsep]
+    \item Nenhum \textit{weight sharing} entre candidatos (o tipo 2 de Partial Training).
+    \item O número fixo de 1 época não se adapta à curva de aprendizado (o que caracterizaria \textit{Adaptive Training}).
+    \item Não há \textit{early stopping}, métricas de zero-shot, nem preditor de desempenho.
+\end{itemize}
+
+% ===========================================================================
+\section{Implementação das SSt}
+% ===========================================================================
+
+Cada SSt recebe como entrada o orçamento \texttt{max\_evals} (número máximo de chamadas reais à VSt) e retorna a melhor arquitetura encontrada junto com sua acurácia de validação. O orçamento foi fixado em \textbf{10 avaliações} para todos os algoritmos.
+
+\subsection{Random Search (RS)}
+
+\textbf{Mecanismo:} a cada iteração, uma arquitetura é amostrada de forma independente e uniforme do SSp, sem usar nenhuma informação das avaliações anteriores. É o \textit{baseline} da comparação.
+
+\textbf{Simplificação:} o RS da literatura frequentemente é usado com um protocolo de \textit{hyperband} ou \textit{successive halving} para alocar orçamentos variáveis de treinamento. Aqui, cada avaliação tem custo fixo (1 época).
+
+\begin{lstlisting}[style=python, caption={Random Search.}]
+def random_search(max_evals):
+    melhor_acc, melhor_arq = 0, None
+    for _ in range(max_evals):
+        arq = gerar_aleatorio()
+        acc = avaliar_arquitetura(arq)
+        if acc > melhor_acc:
+            melhor_acc, melhor_arq = acc, arq
+    return melhor_arq, melhor_acc
+\end{lstlisting}
+
+\subsection{Evolutionary Algorithm (EA)}
+
+\textbf{Mecanismo:} mantém uma população de arquiteturas avaliadas. A cada geração, seleciona os dois melhores indivíduos como pais, aplica \textit{crossover} uniforme (cada gene vem do pai ou da mãe com probabilidade 0,5) e, com probabilidade 0,3, aplica uma \textit{mutação} em um gene aleatório. O filho gerado é avaliado e adicionado à população.
+
+\textbf{Simplificações em relação à literatura:}
+\begin{itemize}[noitemsep]
+    \item A população nunca descarta indivíduos (cresce indefinidamente) — algoritmos como AmoebaNet usam envelhecimento e eliminação dos mais antigos.
+    \item A seleção é sempre determinística (os 2 melhores), sem torneio ou seleção proporcional à \textit{fitness}.
+    \item Sem operadores de crossover mais sofisticados (ponto de corte único, multi-ponto, etc.).
+    \item A população inicial é de apenas 2 indivíduos para respeitar o orçamento de 10 avaliações.
+\end{itemize}
+
+\textbf{Bug corrigido na revisão:} a implementação original gerava a arquitetura e a acurácia do indivíduo inicial de forma desacoplada (dois \texttt{gerar\_aleatorio()} separados), associando a acurácia de uma arquitetura à representação de outra. A correção garante que a arquitetura armazenada e a avaliada sejam a mesma instância.
+
+\begin{lstlisting}[style=python, caption={Evolutionary Algorithm.}]
+def evolutionary_search(max_evals):
+    populacao = []
+    for _ in range(2):
+        arq = gerar_aleatorio()
+        acc = avaliar_arquitetura(arq)  # avalia a MESMA arquitetura gerada
+        populacao.append({'arq': arq, 'acc': acc})
+    evals = 2
+
+    while evals < max_evals:
+        populacao.sort(key=lambda x: x['acc'], reverse=True)
+        pai, mae = populacao[0], populacao[1]
+
+        # Crossover uniforme
+        filho_arq = {
+            k: pai['arq'][k] if random.random() > 0.5 else mae['arq'][k]
+            for k in search_space
+        }
+        # Mutacao com prob. 0.3
+        if random.random() < 0.3:
+            gene = random.choice(list(search_space.keys()))
+            filho_arq[gene] = random.choice(search_space[gene])
+
+        acc = avaliar_arquitetura(filho_arq)
+        populacao.append({'arq': filho_arq, 'acc': acc})
+        evals += 1
+
+    populacao.sort(key=lambda x: x['acc'], reverse=True)
+    return populacao[0]['arq'], populacao[0]['acc']
+\end{lstlisting}
+
+\subsection{Reinforcement Learning (RL) — Multi-Armed Bandit}
+
+\textbf{Mecanismo:} modela cada hiperparâmetro como um \textit{multi-armed bandit} independente. O agente mantém uma distribuição de probabilidades sobre os valores de cada hiperparâmetro e a atualiza com base na recompensa: quando a acurácia obtida supera 95\% do melhor resultado histórico anterior, as probabilidades dos genes escolhidos são multiplicadas por 1,2 (reforço positivo). A amostragem segue a distribuição atualizada.
+
+Esse modelo captura o princípio central do RL aplicado a NAS (exploração guiada por recompensa), sem a complexidade de uma rede controladora com LSTM, como no trabalho de Zoph e Le.
+
+\textbf{Simplificações em relação à literatura:}
+\begin{itemize}[noitemsep]
+    \item O agente real de NAS com RL (e.g., \cite{zoph2017}) é uma RNN que gera sequências de tokens de arquitetura e é treinada com REINFORCE. Aqui o agente é um vetor de probabilidades por hiperparâmetro.
+    \item Não há reforço negativo explícito (punição). As probabilidades de escolhas ruins diminuem apenas relativamente, à medida que as bem-sucedidas crescem.
+    \item As distribuições não são renormalizadas a cada passo, o que pode levar a pesos desproporcionalmente altos em runs longos.
+\end{itemize}
+
+\textbf{Bug corrigido na revisão:} na versão original, a condição de reforço (\texttt{acc >= melhor\_acc * 0.95}) era verificada \emph{após} a atualização de \texttt{melhor\_acc}. Como \texttt{melhor\_acc} era atualizado para \texttt{acc} antes da verificação, a condição era quase sempre verdadeira, aplicando reforço indiscriminadamente. A correção move a atualização de \texttt{melhor\_acc} para \emph{após} o reforço.
+
+\begin{lstlisting}[style=python, caption={RL como Multi-Armed Bandit por hiperparâmetro.}]
+def rl_search(max_evals):
+    probs = {
+        k: {v: 1.0 / len(search_space[k]) for v in search_space[k]}
+        for k in search_space
+    }
+    melhor_acc, melhor_arq = 0, None
+
+    for _ in range(max_evals):
+        arq = {
+            k: random.choices(list(probs[k].keys()),
+                              weights=list(probs[k].values()), k=1)[0]
+            for k in search_space
+        }
+        acc = avaliar_arquitetura(arq)
+
+        # Reforco: compara com melhor_acc ANTES de atualiza-lo
+        if acc >= melhor_acc * 0.95:
+            for k, v in arq.items():
+                probs[k][v] *= 1.2
+
+        if acc > melhor_acc:
+            melhor_acc, melhor_arq = acc, arq
+
+    return melhor_arq, melhor_acc
+\end{lstlisting}
+
+\subsection{Bayesian Optimization (BO)}
+
+\textbf{Mecanismo:} utiliza um modelo substituto (\textit{surrogate model}) para estimar a acurácia esperada de arquiteturas sem avaliá-las na VSt. O ciclo é: (1) as primeiras 3 avaliações são aleatórias (\textit{warm-up}); (2) o surrogate é treinado com o histórico acumulado; (3) um pool de 50 candidatos aleatórios é gerado e avaliado pelo surrogate; (4) o candidato com maior acurácia prevista é submetido à VSt real; (5) o resultado é incorporado ao histórico e o ciclo se repete.
+
+O surrogate escolhido foi o \texttt{RandomForestRegressor} (Scikit-learn), que lida naturalmente com variáveis categóricas codificadas como índices inteiros e não requer escalonamento.
+
+\textbf{Simplificações em relação à literatura:}
+\begin{itemize}[noitemsep]
+    \item O surrogate canônico de BO para NAS é o \textit{Gaussian Process} (GP), que provê incerteza explícita e permite funções de aquisição como \textit{Expected Improvement} (EI) ou \textit{Upper Confidence Bound} (UCB). O Random Forest não fornece incerteza calibrada.
+    \item A estratégia de aquisição aqui é puramente exploratória: escolhe-se o candidato com maior média prevista (\textit{exploitation} puro), sem balancear exploração/exploração.
+    \item O SSp é codificado como vetor de índices inteiros, o que introduz ordenação artificial entre valores categóricos (e.g., \texttt{relu}=0, \texttt{elu}=1, \texttt{tanh}=2). Um encoding mais correto seria \textit{one-hot}.
+\end{itemize}
+
+\begin{lstlisting}[style=python, caption={Bayesian Optimization com surrogate Random Forest.}]
+def bayesian_search(max_evals):
+    def dict_to_vec(arq):
+        return [search_space[k].index(arq[k]) for k in search_space]
+
+    historico_X, historico_y = [], []
+    melhor_acc, melhor_arq = 0, None
+    surrogate = RandomForestRegressor(n_estimators=10, random_state=42)
+
+    # Warm-up: avaliacoes aleatorias para inicializar o surrogate
+    for _ in range(min(3, max_evals)):
+        arq = gerar_aleatorio()
+        acc = avaliar_arquitetura(arq)
+        historico_X.append(dict_to_vec(arq))
+        historico_y.append(acc)
+        if acc > melhor_acc:
+            melhor_acc, melhor_arq = acc, arq
+
+    for _ in range(min(3, max_evals), max_evals):
+        surrogate.fit(historico_X, historico_y)
+        candidatos = [gerar_aleatorio() for _ in range(50)]
+        previsoes  = surrogate.predict([dict_to_vec(c) for c in candidatos])
+        melhor_candidato = candidatos[np.argmax(previsoes)]
+        acc = avaliar_arquitetura(melhor_candidato)
+        historico_X.append(dict_to_vec(melhor_candidato))
+        historico_y.append(acc)
+        if acc > melhor_acc:
+            melhor_acc, melhor_arq = acc, melhor_candidato
+
+    return melhor_arq, melhor_acc
+\end{lstlisting}
+
+\subsection{Hill Climbing / Gradient-based (GO)}
+
+\textbf{Mecanismo:} análogo discreto da descida de gradiente. Parte de um ponto inicial aleatório no SSp. A cada passo, gera um vizinho alterando exatamente um hiperparâmetro para um valor aleatório (equivalente a um passo unitário em uma dimensão do SSp). Move-se para o vizinho somente se ele for melhor que o estado atual — aceita apenas \textit{gradiente positivo}.
+
+\textbf{Simplificações em relação à literatura:}
+\begin{itemize}[noitemsep]
+    \item Algoritmos GO reais para NAS (e.g., DARTS) operam em SSp contínuo, usando gradientes verdadeiros calculados por backpropagation sobre parâmetros de arquitetura $\alpha$. Aqui o espaço é discreto e o ``gradiente'' é apenas a direção de melhora.
+    \item A ausência de reinicializações torna o algoritmo susceptível a ótimos locais: uma vez preso, nunca escapa.
+    \item Não há estratégia de \textit{momentum}, \textit{simulated annealing} ou qualquer mecanismo para aceitar movimentos piores com alguma probabilidade.
+\end{itemize}
+
+\begin{lstlisting}[style=python, caption={Hill Climbing discreto (análogo ao gradient-based).}]
+def hill_climbing_search(max_evals):
+    atual_arq = gerar_aleatorio()
+    atual_acc = avaliar_arquitetura(atual_arq)
+    evals = 1
+
+    while evals < max_evals:
+        vizinho_arq = atual_arq.copy()
+        param = random.choice(list(search_space.keys()))
+        vizinho_arq[param] = random.choice(search_space[param])
+
+        vizinho_acc = avaliar_arquitetura(vizinho_arq)
+        evals += 1
+
+        # Aceita somente se melhora (greedy)
+        if vizinho_acc > atual_acc:
+            atual_arq, atual_acc = vizinho_arq, vizinho_acc
+
+    return atual_arq, atual_acc
+\end{lstlisting}
+
+% ===========================================================================
+\section{Protocolo de Comparação}
+% ===========================================================================
+
+Para garantir que as diferenças de desempenho reflitam a qualidade da SSt e não do custo computacional, o protocolo impõe as seguintes restrições:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Orçamento igual:} todas as SSt recebem exatamente \texttt{max\_evals = 10} chamadas reais à VSt.
+    \item \textbf{Mesma VSt:} todas usam a mesma função \texttt{avaliar\_arquitetura} (1 época, mesmo subconjunto de dados).
+    \item \textbf{Mesma métrica:} acurácia de validação ao final do treinamento.
+    \item \textbf{Mesmo SSp:} dicionário \texttt{search\_space} compartilhado.
+\end{itemize}
+
+O tempo de execução é medido por SSt usando \texttt{time.time()}, mas não é usado como critério de ranqueamento — serve apenas para evidenciar que o tempo é dominado pelo treinamento (VSt), não pelo overhead da SSt em si.
+
+% ===========================================================================
+\section{Limitações da Implementação}
+% ===========================================================================
+
+As seguintes limitações devem ser consideradas ao interpretar os resultados:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Orçamento de 10 avaliações é muito pequeno.} Na literatura, experimentos NAS utilizam centenas a milhares de avaliações. Com 10, o componente aleatório domina: resultados variam consideravelmente entre execuções.
+
+    \item \textbf{SSp com apenas 54 pontos.} O espaço é pequeno o suficiente para ser explorado quase completamente por RS. SSt sofisticadas (BO, EA) só se diferenciam significativamente em espaços maiores.
+
+    \item \textbf{VSt de baixa fidelidade introduz ruído.} A acurácia após 1 época é ruidosa e nem sempre prediz a acurácia ao convergir. Isso prejudica especialmente BO, cujo surrogate aprende um sinal ruidoso.
+
+    \item \textbf{Variância entre execuções.} Nenhum \texttt{random.seed} global foi fixado, portanto cada execução produz resultados ligeiramente diferentes. Para comparação científica, seria necessário múltiplas execuções com sementes fixas e análise estatística.
+
+    \item \textbf{Arquitetura fixa.} O SSp não inclui variações de profundidade, tipos de camada ou conexões. Isso limita a representatividade do experimento em relação a NAS real.
+\end{enumerate}
+
+% ===========================================================================
+% APÊNDICE: Introdução e Fundamentação Teórica (parte anterior do trabalho)
+% ===========================================================================
+\newpage
+\begin{appendices}
+
+\section{Introdução e Fundamentação Teórica}
+\label{app:intro}
+
+\textit{Esta seção reproduz a parte introdutória do seminário, elaborada previamente, para manter o documento autocontido.}
+
+\bigskip
+
+\subsection*{Introdução}
+O campo da Aprendizagem de Máquina (Machine Learning) revolucionou diversas áreas; no entanto, o processo manual de desenhar e otimizar modelos exige perícia especializada. Para enfrentar estes desafios, surgiu o AutoML, em que o aprendizado é feito automaticamente sem a escolha prévia de um especialista, sendo a \textit{Neural Architecture Search} (NAS) um subcampo focado na automatização do design das arquiteturas das redes neurais.
+
+\subsection*{Fundamentação Teórica}
+
+\subsubsection*{\textit{Search Space} (SSp)}
+O Espaço de Busca (SSp) define o conjunto de todos os hiperparâmetros e arquiteturas possíveis que podem ser formados, incluindo tipos de camadas, conexões e funções de ativação. Um SSp amplo garante a presença de modelos otimizados, mas pode tornar a exploração infinita. As principais categorias de SSp são:
+\begin{itemize}[noitemsep]
+    \item \textbf{\textit{Layer-based}:} Cada camada só se conecta com a sua respectiva próxima camada. Assim, o otimizador é obrigado a procurar arquiteturas em série. Um exemplo (\url{https://arxiv.org/abs/1812.03443}) fixou 22 camadas, cada uma escolhível entre nove opções, reduzindo o tempo de busca ao limitar as opções.
+
+    \item \textbf{\textit{Hierarchical-based}:} Além das conexões em série, o modelo pode ter ramificações paralelas e \textit{skip connections}. Como o espaço amostral é aumentado, necessita-se de técnicas para reduzir o tempo de processamento (\url{https://arxiv.org/abs/1807.11626} e \url{https://arxiv.org/abs/1912.00195}).
+
+    \item \textbf{\textit{Cell-based}:} A unidade de seleção é uma célula que será conectada em série para criar modelos com diferentes tamanhos. As camadas em cada célula são conectadas hierarquicamente, combinando os benefícios hierárquicos com menor SSp por conta da seleção baseada em células (\url{https://arxiv.org/abs/1712.00559}).
+\end{itemize}
+
+\paragraph{Como gerenciar o tamanho do SSp de forma eficiente?}
+
+\begin{itemize}
+    \item \textbf{Adaptação dinâmica do SSp:} A abordagem mais simples é limitar manualmente a quantidade de camadas/conexões, porém os métodos mais modernos modificam o SSp durante a otimização, guiados por restrições de hardware. O FP-NAS usa aprendizado probabilístico para reduzir o SSp dinamicamente, resultando em menor uso de memória e FLOPs.
+
+    \item \textbf{Uso de variáveis contínuas:} Métodos como DARTS e CP-NAS transformam o SSp discreto em espaço contínuo. Cada conexão recebe uma variável contínua, e métodos baseados em gradiente ajustam os pesos dessas conexões.
+
+    \item \textbf{Problema das restrições rígidas vs.\ poda:} Restrições excessivas forçam o algoritmo a explorar apenas complexidades específicas. Uma alternativa mais eficiente é iniciar com células complexas e aplicar \textit{pruning} dinâmico ao longo da busca.
+
+    \item \textbf{Vantagem de limitar o SSp:} Para produção em hardware restrito e integração com MLOps, a limitação prévia evita treinamentos inviáveis de arquiteturas excessivamente complexas.
+\end{itemize}
+
+\subsubsection*{\textit{Search Strategy} (SSt)}
+A Estratégia de Busca (SSt) determina como explorar o SSp para encontrar o melhor modelo para um determinado \textit{dataset}. Os otimizadores mais recorrentes na literatura são:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{\textit{Reinforcement Learning} (RL):} O agente recebe recompensa/punição baseada no desempenho obtido na validação. No trabalho de Zoph e Le (\url{https://arxiv.org/abs/1611.01578}), o problema é definido como um agente RL que otimiza acurácia por seleção de componentes arquiteturais. Demanda muito poder computacional.
+
+    \item \textbf{\textit{Evolutionary Algorithms} (EA):} Baseados em princípios biológicos: população inicial de arquiteturas, avaliação de performance, evolução por seleção e crossover/mutação, critério de parada predefinido.
+
+    \item \textbf{\textit{Bayesian Optimization} (BO):} Utiliza modelos probabilísticos para aproximar a função objetivo e selecionar o próximo conjunto de hiperparâmetros. Eficiente quando a avaliação é cara (\url{https://arxiv.org/abs/1806.10282}).
+
+    \item \textbf{\textit{Gradient-based optimizer} (GO):} Depende do gradiente da função objetivo para atualizar os hiperparâmetros iterativamente. Computacionalmente caro pelo caráter iterativo, mas acelerado por GPUs (\url{https://arxiv.org/abs/1910.04465}).
+
+    \item \textbf{\textit{Random Search} (RS):} Método simples para problemas discretos (\url{https://arxiv.org/abs/1902.07638}). É o mais lento dos otimizadores e tem aplicação principalmente como baseline de validação.
+\end{itemize}
+
+\subsubsection*{Estratégia de Validação (VSt)}
+
+É a etapa que mais consome tempo nos algoritmos NAS, retornando a performance de um modelo via função objetivo e realimentando SSt e SSp.
+
+\begin{itemize}[noitemsep]
+    \item \textbf{\textit{Full Training}:} Cada arquitetura é treinada por completo. Produz comparações exatas, mas com custo exaustivo.
+
+    \item \textbf{\textit{Partial Training}:} Treino por $r < n$ iterações, desde o zero (tipo 1) ou com herança de pesos (\textit{weight sharing}, tipo 2). O tipo 2 inclui: superrede treinada uma vez com subsets como modelos menores (\url{https://arxiv.org/abs/1806.09055}); pesos compartilhados de modelos pequenos para um grande (\url{https://arxiv.org/abs/2104.00597}); compartilhamento por modelos salvos (\url{https://arxiv.org/abs/2004.05565}); transferência compatível com EA, como o ENAS (\url{https://arxiv.org/abs/1802.03268}).
+
+    \item \textbf{\textit{Adaptive Training}:} Treino completo do zero, mas com número de iterações determinado pela curva de aprendizado (\url{https://dynn-icml2022.github.io/papers/paper_11.pdf}).
+
+    \item \textbf{\textit{No Training} (zero-shot):} Métodos que pontuam arquiteturas sem treinamento, com base em propriedades do modelo e/ou dos dados (\url{https://arxiv.org/abs/2006.04647}).
+\end{itemize}
+
+\end{appendices}
+
+\end{document}
