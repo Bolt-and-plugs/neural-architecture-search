@@ -39,3 +39,5 @@ motivation can be explained by an example situation:
 
 1. Why care about NAS? [https://youtu.be/_dR8a5ZcBgM?si=BZx7c7BzxSQjO9Fs]
 2. Systematic review on neural architecture search [https://link.springer.com/article/10.1007/s10462-024-11058-w]
+3. Liu, Hanxiao et al. DARTS: Differentiable Architecture Search. In: International Conference on Learning Representations (ICLR), 2019 [https://arxiv.org/abs/1806.09055]
+4. White, Colin et al. Neural architecture search: Insights from 1000 papers. arXiv preprint arXiv:2301.08727, 2023 [https://arxiv.org/abs/2301.08727]
